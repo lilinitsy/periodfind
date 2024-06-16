@@ -180,7 +180,7 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
     gpuErrchk(cudaMalloc(&dev_per, per_out_size));
 
     // Kernel launch information
-    const size_t x_threads = 256;
+    const size_t x_threads = 512;
     const size_t y_threads = 1;
     const size_t x_blocks = ((num_periods + x_threads - 1) / x_threads);
     const size_t y_blocks = ((num_p_dts + y_threads - 1) / y_threads);
