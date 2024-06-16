@@ -4,6 +4,8 @@ include(GNUInstallDirs)
 
 project(periodfind LANGUAGES CXX CUDA)
 
+set(CMAKE_CUDA_ARCHITECTURE [50, 52, 60, 61, 70, 75])
+
 add_library(periodfind SHARED
             periodfind/cuda/ce.cu
             periodfind/cuda/aov.cu
