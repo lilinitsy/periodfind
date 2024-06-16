@@ -197,29 +197,40 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
     gpuErrchk(cudaMalloc(&dev_times_buffer, buffer_bytes));
     gpuErrchk(cudaMalloc(&dev_mags_buffer, buffer_bytes));
 
+    cudaStream_t stream1;
+    cudaStream_t stream2;
+    cudaStreamCreate(&stream1);
+    cudaStreamCreate(&stream2);
+
     for (size_t i = 0; i < lengths.size(); i++) {
+        cudaStream_t current_stream = (i & 0b1 == 0) ? stream1 : stream2;
         // Copy light curve into device buffer
         const size_t curve_bytes = lengths[i] * sizeof(float);
 
-        cudaMemcpyAsync(dev_times_buffer, times[i], curve_bytes, cudaMemcpyHostToDevice);
-        cudaMemcpyAsync(dev_mags_buffer, mags[i], curve_bytes, cudaMemcpyHostToDevice);
+        cudaMemcpyAsync(dev_times_buffer, times[i], curve_bytes, cudaMemcpyHostToDevice, current_stream);
+        cudaMemcpyAsync(dev_mags_buffer, mags[i], curve_bytes, cudaMemcpyHostToDevice, current_stream);
         // cudaMemcpy(dev_times_buffer, times[i], curve_bytes,
         //            cudaMemcpyHostToDevice);
         // cudaMemcpy(dev_mags_buffer, mags[i], curve_bytes,
         //            cudaMemcpyHostToDevice);
 
         // Zero conditional entropy output
-        gpuErrchk(cudaMemset(dev_per, 0, per_out_size));
+        gpuErrchk(cudaMemsetAsync(dev_per, 0, per_out_size, current_stream));
 
-        LombScargleKernel<<<grid_dim, block_dim>>>(
+        LombScargleKernel<<<grid_dim, block_dim, 0, current_stream>>>(
             dev_times_buffer, dev_mags_buffer, lengths[i], dev_periods,
             dev_period_dts, num_periods, num_p_dts, *this, dev_per);
 
         // Copy periodogram back to host
-        cudaMemcpyAsync(&per_out[i * per_points], dev_per, per_out_size, cudaMemcpyDeviceToHost);
+        cudaMemcpyAsync(&per_out[i * per_points], dev_per, per_out_size, cudaMemcpyDeviceToHost, current_stream);
         //cudaMemcpy(&per_out[i * per_points], dev_per, per_out_size,
         //           cudaMemcpyDeviceToHost);
     }
+
+    cudaStreamSynchronize(stream1);
+    cudaStreamSynchronize(stream2);
+    cudaStreamDestroy(stream1);
+    cudaStreamDestroy(stream2);
 
     // Free all of the GPU memory
     gpuErrchk(cudaFree(dev_periods));
