@@ -63,7 +63,7 @@ __global__ void LombScargleKernel(const float* times,
         float t_corr = t - pdt_corr * t * t;
         float folded = fabsf(modff(t_corr / period, &i_part));
 
-        sincosf(TWO_PI * folded, &sin, &cos);
+        __sincosf(TWO_PI * folded, &sin, &cos);
 
         mag_cos += mag * cos;
         mag_sin += mag * sin;
@@ -74,7 +74,7 @@ __global__ void LombScargleKernel(const float* times,
     float sin_sin = static_cast<float>(length) - cos_cos;
 
     float cos_tau, sin_tau;
-    sincosf(0.5 * atan2f(2.0 * cos_sin, cos_cos - sin_sin), &sin_tau, &cos_tau);
+    __sincosf(0.5 * atan2f(2.0 * cos_sin, cos_cos - sin_sin), &sin_tau, &cos_tau);
 
     float numerator_l = cos_tau * mag_cos + sin_tau * mag_sin;
     numerator_l *= numerator_l;
@@ -227,10 +227,9 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
             LombScargleKernel<<<grid_dim, block_dim, 0, stream2>>>(
                 dev_times_buffer_stream2, dev_mags_buffer_stream2, lengths[next_idx], dev_periods,
                 dev_period_dts, num_periods, num_p_dts, *this, dev_per_stream2);
-
         }
 
-        // Zero conditional entropy output
+        // Zero conditional entropy outpu   t
         gpuErrchk(cudaMemsetAsync(dev_per_stream1, 0, per_out_size, stream1));
 
         LombScargleKernel<<<grid_dim, block_dim, 0, stream1>>>(
