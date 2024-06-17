@@ -4,7 +4,9 @@ include(GNUInstallDirs)
 
 project(periodfind LANGUAGES CXX CUDA)
 
-set(CMAKE_CUDA_ARCHITECTURE [50, 52, 60, 61, 70, 75])
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURE 50 52 60 61 70 75)
+endif()
 
 add_library(periodfind SHARED
             periodfind/cuda/ce.cu
@@ -17,6 +19,8 @@ target_compile_features(periodfind PUBLIC cxx_std_14)
 
 set_target_properties(periodfind
                       PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+target_compile_options(periodfind PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-use_fast_math>)
 
 set_target_properties(periodfind PROPERTIES PUBLIC_HEADER "${HEADER_FILES}")
 
