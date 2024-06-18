@@ -26,11 +26,11 @@ LombScargle::LombScargle() {}
 // CUDA Kernels
 //
 
-__global__ void LombScargleKernel(const float* times,
-                                  const float* mags,
+__global__ void LombScargleKernel(const float* __restrict__ times,
+                                  const float* __restrict__ mags,
                                   const size_t length,
-                                  const float* periods,
-                                  const float* period_dts,
+                                  const float* __restrict__ periods,
+                                  const float* __restrict__ period_dts,
                                   const size_t num_periods,
                                   const size_t num_period_dts,
                                   const LombScargle params,
@@ -47,12 +47,12 @@ __global__ void LombScargleKernel(const float* times,
     const float period_dt = period_dts[thread_y];
 
     // Time derivative correction factor.
-    const float pdt_corr = (period_dt / period) / 2;
+    const float pdt_corr = (period_dt / period) * 0.5f;
 
-    float mag_cos = 0.0;
-    float mag_sin = 0.0;
-    float cos_cos = 0.0;
-    float cos_sin = 0.0;
+    float mag_cos = 0.0f;
+    float mag_sin = 0.0f;
+    float cos_cos = 0.0f;
+    float cos_sin = 0.0f;
 
     float cos, sin, i_part;
 
@@ -74,7 +74,7 @@ __global__ void LombScargleKernel(const float* times,
     float sin_sin = static_cast<float>(length) - cos_cos;
 
     float cos_tau, sin_tau;
-    __sincosf(0.5 * atan2f(2.0 * cos_sin, cos_cos - sin_sin), &sin_tau, &cos_tau);
+    __sincosf(0.5f * atan2f(2.0f * cos_sin, cos_cos - sin_sin), &sin_tau, &cos_tau);
 
     float numerator_l = cos_tau * mag_cos + sin_tau * mag_sin;
     numerator_l *= numerator_l;
