@@ -56,7 +56,7 @@ __global__ void LombScargleKernel(const float* __restrict__ times,
 
     float cos, sin, i_part;
 
-    #pragma unroll
+#pragma unroll
     for (size_t idx = 0; idx < length; idx++) {
         float t = times[idx];
         float mag = mags[idx];
@@ -75,7 +75,8 @@ __global__ void LombScargleKernel(const float* __restrict__ times,
     float sin_sin = static_cast<float>(length) - cos_cos;
 
     float cos_tau, sin_tau;
-    __sincosf(0.5f * atan2f(2.0f * cos_sin, cos_cos - sin_sin), &sin_tau, &cos_tau);
+    __sincosf(0.5f * atan2f(2.0f * cos_sin, cos_cos - sin_sin), &sin_tau,
+              &cos_tau);
 
     float numerator_l = cos_tau * mag_cos + sin_tau * mag_sin;
     numerator_l *= numerator_l;
@@ -158,31 +159,30 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
                                 const size_t num_periods,
                                 const size_t num_p_dts,
                                 float* per_out) const {
-    // TODO: Use async memory transferring
     // TODO: Look at ways of batching data transfer.
 
     // Size of one periodogram out array, and total periodogram output size.
-    size_t per_points = num_periods * num_p_dts;
-    size_t per_out_size = per_points * sizeof(float);
-    size_t per_size_total = per_out_size * lengths.size();
+    const size_t per_points = num_periods * num_p_dts;
+    const size_t per_out_size = per_points * sizeof(float);
+    const size_t per_points_doubled = 2 * per_points;
+    const size_t num_streams = 3;
 
-    // Copy trial information over
+    // Buffer size (large enough for longest light curve)
+    auto max_length = std::max_element(lengths.begin(), lengths.end());
+    const size_t buffer_length = *max_length;
+    const size_t buffer_bytes = sizeof(float) * buffer_length;
+    const size_t buffer_length_doubled = 2 * buffer_length;
+
+    // Trial information
     float* dev_periods;
     float* dev_period_dts;
-    gpuErrchk(cudaMalloc(&dev_periods, num_periods * sizeof(float)));
-    gpuErrchk(cudaMalloc(&dev_period_dts, num_p_dts * sizeof(float)));
-    gpuErrchk(cudaMemcpy(dev_periods, periods, num_periods * sizeof(float),
-                         cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMemcpy(dev_period_dts, period_dts, num_p_dts * sizeof(float),
-                         cudaMemcpyHostToDevice));
 
     // Intermediate conditional entropy memory
-    float* dev_per_stream1;
-    float* dev_per_stream2;
-    float* dev_per_stream3;
-    gpuErrchk(cudaMalloc(&dev_per_stream1, per_out_size));
-    gpuErrchk(cudaMalloc(&dev_per_stream2, per_out_size));
-    gpuErrchk(cudaMalloc(&dev_per_stream3, per_out_size));
+    float* dev_per;
+
+    // Device data
+    float* dev_times_buffer;
+    float* dev_mags_buffer;
 
     // Kernel launch information
     const size_t x_threads = 512;
@@ -192,24 +192,7 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
     const dim3 block_dim = dim3(x_threads, y_threads);
     const dim3 grid_dim = dim3(x_blocks, y_blocks);
 
-    // Buffer size (large enough for longest light curve)
-    auto max_length = std::max_element(lengths.begin(), lengths.end());
-    const size_t buffer_length = *max_length;
-    const size_t buffer_bytes = sizeof(float) * buffer_length;
-
-    float* dev_times_buffer_stream1;
-    float* dev_times_buffer_stream2;
-    float* dev_times_buffer_stream3;
-    float* dev_mags_buffer_stream1;
-    float* dev_mags_buffer_stream2;
-    float* dev_mags_buffer_stream3;
-    gpuErrchk(cudaMalloc(&dev_times_buffer_stream1, buffer_bytes));
-    gpuErrchk(cudaMalloc(&dev_times_buffer_stream2, buffer_bytes));
-    gpuErrchk(cudaMalloc(&dev_times_buffer_stream3, buffer_bytes));
-    gpuErrchk(cudaMalloc(&dev_mags_buffer_stream1, buffer_bytes));
-    gpuErrchk(cudaMalloc(&dev_mags_buffer_stream2, buffer_bytes));
-    gpuErrchk(cudaMalloc(&dev_mags_buffer_stream3, buffer_bytes));
-
+    // Create 3 cuda streams to pipeline async operations; loop would be cleaner, but slowed execution
     cudaStream_t stream1;
     cudaStream_t stream2;
     cudaStream_t stream3;
@@ -217,82 +200,102 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
     cudaStreamCreate(&stream2);
     cudaStreamCreate(&stream3);
 
-    for (size_t i = 0; i < lengths.size(); i+= 3) {
-        //cudaStream_t current_stream = (i & 0b1 == 0) ? stream1 : stream2;
+    // Perform all allocations
+    gpuErrchk(cudaMalloc(&dev_periods, num_periods * sizeof(float)));
+    gpuErrchk(cudaMalloc(&dev_period_dts, num_p_dts * sizeof(float)));
+    gpuErrchk(cudaMemcpy(dev_periods, periods, num_periods * sizeof(float),
+                         cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMemcpy(dev_period_dts, period_dts, num_p_dts * sizeof(float),
+                         cudaMemcpyHostToDevice));
+    gpuErrchk(cudaMalloc(&dev_per, per_out_size * num_streams));
+    gpuErrchk(cudaMalloc(&dev_times_buffer, buffer_bytes * num_streams));
+    gpuErrchk(cudaMalloc(&dev_mags_buffer, buffer_bytes * num_streams));
+
+#pragma unroll
+    for (size_t i = 0; i < lengths.size(); i += num_streams) {
         // Copy light curve into device buffer
         size_t i_plus_1 = i + 1;
         size_t i_plus_2 = i + 2;
         const size_t curve_bytes_i = lengths[i] * sizeof(float);
-        
-        cudaMemcpyAsync(dev_times_buffer_stream1, times[i], curve_bytes_i, cudaMemcpyHostToDevice, stream1);
-        cudaMemcpyAsync(dev_mags_buffer_stream1, mags[i], curve_bytes_i, cudaMemcpyHostToDevice, stream1);
 
-        if(i_plus_1 < lengths.size())
-        {
+        cudaMemcpyAsync(dev_times_buffer, times[i], curve_bytes_i,
+                        cudaMemcpyHostToDevice, stream1);
+        cudaMemcpyAsync(dev_mags_buffer, mags[i], curve_bytes_i,
+                        cudaMemcpyHostToDevice, stream1);
+
+        if (i_plus_1 < lengths.size()) {
             const size_t curve_bytes_next = lengths[i_plus_1] * sizeof(float);
-            cudaMemcpyAsync(dev_times_buffer_stream2, times[i_plus_1], curve_bytes_next, cudaMemcpyHostToDevice, stream2);
-            cudaMemcpyAsync(dev_mags_buffer_stream2, mags[i_plus_1], curve_bytes_next, cudaMemcpyHostToDevice, stream2);
-            gpuErrchk(cudaMemsetAsync(dev_per_stream2, 0, per_out_size, stream2));
+            gpuErrchk(cudaMemcpyAsync(dev_times_buffer + buffer_length,
+                                      times[i_plus_1], curve_bytes_next,
+                                      cudaMemcpyHostToDevice, stream2));
+            gpuErrchk(cudaMemcpyAsync(dev_mags_buffer + buffer_length,
+                                      mags[i_plus_1], curve_bytes_next,
+                                      cudaMemcpyHostToDevice, stream2));
+            gpuErrchk(cudaMemsetAsync(dev_per + per_points, 0, per_out_size,
+                                      stream2));
 
             LombScargleKernel<<<grid_dim, block_dim, 0, stream2>>>(
-                dev_times_buffer_stream2, dev_mags_buffer_stream2, lengths[i_plus_1], dev_periods,
-                dev_period_dts, num_periods, num_p_dts, *this, dev_per_stream2);
+                dev_times_buffer + buffer_length,
+                dev_mags_buffer + buffer_length, lengths[i_plus_1], dev_periods,
+                dev_period_dts, num_periods, num_p_dts, *this,
+                dev_per + per_points);
         }
 
-        if(i_plus_2 < lengths.size())
-        {
+        if (i_plus_2 < lengths.size()) {
             const size_t curve_bytes_next = lengths[i_plus_2] * sizeof(float);
-            cudaMemcpyAsync(dev_times_buffer_stream3, times[i_plus_2], curve_bytes_next, cudaMemcpyHostToDevice, stream3);
-            cudaMemcpyAsync(dev_mags_buffer_stream3, mags[i_plus_2], curve_bytes_next, cudaMemcpyHostToDevice, stream3);
-            gpuErrchk(cudaMemsetAsync(dev_per_stream3, 0, per_out_size, stream3));
+            gpuErrchk(cudaMemcpyAsync(dev_times_buffer + buffer_length_doubled,
+                                      times[i_plus_2], curve_bytes_next,
+                                      cudaMemcpyHostToDevice, stream3));
+            gpuErrchk(cudaMemcpyAsync(dev_mags_buffer + buffer_length_doubled,
+                                      mags[i_plus_2], curve_bytes_next,
+                                      cudaMemcpyHostToDevice, stream3));
+            gpuErrchk(cudaMemsetAsync(dev_per + per_points_doubled, 0,
+                                      per_out_size, stream3));
 
             LombScargleKernel<<<grid_dim, block_dim, 0, stream3>>>(
-                dev_times_buffer_stream3, dev_mags_buffer_stream3, lengths[i_plus_2], dev_periods,
-                dev_period_dts, num_periods, num_p_dts, *this, dev_per_stream3);
+                dev_times_buffer + buffer_length_doubled,
+                dev_mags_buffer + buffer_length_doubled, lengths[i_plus_2],
+                dev_periods, dev_period_dts, num_periods, num_p_dts, *this,
+                dev_per + per_points_doubled);
+        }
 
-        }        
-
-        // Zero conditional entropy outpu   t
-        gpuErrchk(cudaMemsetAsync(dev_per_stream1, 0, per_out_size, stream1));
+        // Zero conditional entropy output
+        gpuErrchk(cudaMemsetAsync(dev_per, 0, per_out_size, stream1));
 
         LombScargleKernel<<<grid_dim, block_dim, 0, stream1>>>(
-            dev_times_buffer_stream1, dev_mags_buffer_stream1, lengths[i], dev_periods,
-            dev_period_dts, num_periods, num_p_dts, *this, dev_per_stream1);
+            dev_times_buffer, dev_mags_buffer, lengths[i], dev_periods,
+            dev_period_dts, num_periods, num_p_dts, *this, dev_per);
 
         // Copy periodogram back to host
-        cudaMemcpyAsync(&per_out[i * per_points], dev_per_stream1, per_out_size, cudaMemcpyDeviceToHost, stream1);
-        if(i_plus_1 < lengths.size())
-        {
-            cudaMemcpyAsync(&per_out[i_plus_1 * per_points], dev_per_stream2, per_out_size, cudaMemcpyDeviceToHost, stream2);
+        gpuErrchk(cudaMemcpyAsync(&per_out[i * per_points], dev_per,
+                                  per_out_size, cudaMemcpyDeviceToHost,
+                                  stream1));
+        if (i_plus_1 < lengths.size()) {
+            gpuErrchk(cudaMemcpyAsync(&per_out[i_plus_1 * per_points],
+                                      dev_per + per_points, per_out_size,
+                                      cudaMemcpyDeviceToHost, stream2));
         }
-        if(i_plus_2 < lengths.size())
-        {
-            cudaMemcpyAsync(&per_out[i_plus_2 * per_points], dev_per_stream3, per_out_size, cudaMemcpyDeviceToHost, stream3);
-        }        
+        if (i_plus_2 < lengths.size()) {
+            gpuErrchk(cudaMemcpyAsync(
+                &per_out[i_plus_2 * per_points], dev_per + per_points_doubled,
+                per_out_size, cudaMemcpyDeviceToHost, stream3));
+        }
     }
 
-    cudaStreamSynchronize(stream1);
-    cudaStreamSynchronize(stream2);
-    cudaStreamSynchronize(stream3);
-    cudaStreamDestroy(stream1);
-    cudaStreamDestroy(stream2);
-    cudaStreamDestroy(stream3);
+    gpuErrchk(cudaStreamSynchronize(stream1));
+    gpuErrchk(cudaStreamSynchronize(stream2));
+    gpuErrchk(cudaStreamSynchronize(stream3));
+    gpuErrchk(cudaStreamDestroy(stream1));
+    gpuErrchk(cudaStreamDestroy(stream2));
+    gpuErrchk(cudaStreamDestroy(stream3));
 
     // Free all of the GPU memory
     gpuErrchk(cudaFree(dev_periods));
     gpuErrchk(cudaFree(dev_period_dts));
-    gpuErrchk(cudaFree(dev_per_stream1));
-    gpuErrchk(cudaFree(dev_per_stream2));
-    gpuErrchk(cudaFree(dev_per_stream3));
-    gpuErrchk(cudaFree(dev_times_buffer_stream1));
-    gpuErrchk(cudaFree(dev_times_buffer_stream2));
-    gpuErrchk(cudaFree(dev_times_buffer_stream3));
-    gpuErrchk(cudaFree(dev_mags_buffer_stream1));
-    gpuErrchk(cudaFree(dev_mags_buffer_stream2));
-    gpuErrchk(cudaFree(dev_mags_buffer_stream3));
-
+    gpuErrchk(cudaFree(dev_per));
+    gpuErrchk(cudaFree(dev_times_buffer));
+    gpuErrchk(cudaFree(dev_mags_buffer));
 }
-
 
 float* LombScargle::CalcLSBatched(const std::vector<float*>& times,
                                   const std::vector<float*>& mags,
