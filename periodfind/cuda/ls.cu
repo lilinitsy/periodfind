@@ -220,34 +220,34 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
     for (size_t i = 0; i < lengths.size(); i+= 3) {
         //cudaStream_t current_stream = (i & 0b1 == 0) ? stream1 : stream2;
         // Copy light curve into device buffer
-        size_t next_idx = i + 1;
-        size_t next_next_idx = i + 2;
+        size_t i_plus_1 = i + 1;
+        size_t i_plus_2 = i + 2;
         const size_t curve_bytes_i = lengths[i] * sizeof(float);
         
         cudaMemcpyAsync(dev_times_buffer_stream1, times[i], curve_bytes_i, cudaMemcpyHostToDevice, stream1);
         cudaMemcpyAsync(dev_mags_buffer_stream1, mags[i], curve_bytes_i, cudaMemcpyHostToDevice, stream1);
 
-        if(next_idx < lengths.size())
+        if(i_plus_1 < lengths.size())
         {
-            const size_t curve_bytes_next = lengths[next_idx] * sizeof(float);
-            cudaMemcpyAsync(dev_times_buffer_stream2, times[next_idx], curve_bytes_next, cudaMemcpyHostToDevice, stream2);
-            cudaMemcpyAsync(dev_mags_buffer_stream2, mags[next_idx], curve_bytes_next, cudaMemcpyHostToDevice, stream2);
+            const size_t curve_bytes_next = lengths[i_plus_1] * sizeof(float);
+            cudaMemcpyAsync(dev_times_buffer_stream2, times[i_plus_1], curve_bytes_next, cudaMemcpyHostToDevice, stream2);
+            cudaMemcpyAsync(dev_mags_buffer_stream2, mags[i_plus_1], curve_bytes_next, cudaMemcpyHostToDevice, stream2);
             gpuErrchk(cudaMemsetAsync(dev_per_stream2, 0, per_out_size, stream2));
 
             LombScargleKernel<<<grid_dim, block_dim, 0, stream2>>>(
-                dev_times_buffer_stream2, dev_mags_buffer_stream2, lengths[next_idx], dev_periods,
+                dev_times_buffer_stream2, dev_mags_buffer_stream2, lengths[i_plus_1], dev_periods,
                 dev_period_dts, num_periods, num_p_dts, *this, dev_per_stream2);
         }
 
-        if(next_next_idx < lengths.size())
+        if(i_plus_2 < lengths.size())
         {
-            const size_t curve_bytes_next = lengths[next_next_idx] * sizeof(float);
-            cudaMemcpyAsync(dev_times_buffer_stream3, times[next_next_idx], curve_bytes_next, cudaMemcpyHostToDevice, stream3);
-            cudaMemcpyAsync(dev_mags_buffer_stream3, mags[next_next_idx], curve_bytes_next, cudaMemcpyHostToDevice, stream3);
+            const size_t curve_bytes_next = lengths[i_plus_2] * sizeof(float);
+            cudaMemcpyAsync(dev_times_buffer_stream3, times[i_plus_2], curve_bytes_next, cudaMemcpyHostToDevice, stream3);
+            cudaMemcpyAsync(dev_mags_buffer_stream3, mags[i_plus_2], curve_bytes_next, cudaMemcpyHostToDevice, stream3);
             gpuErrchk(cudaMemsetAsync(dev_per_stream3, 0, per_out_size, stream3));
 
             LombScargleKernel<<<grid_dim, block_dim, 0, stream3>>>(
-                dev_times_buffer_stream3, dev_mags_buffer_stream3, lengths[next_next_idx], dev_periods,
+                dev_times_buffer_stream3, dev_mags_buffer_stream3, lengths[i_plus_2], dev_periods,
                 dev_period_dts, num_periods, num_p_dts, *this, dev_per_stream3);
 
         }        
@@ -261,13 +261,13 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
 
         // Copy periodogram back to host
         cudaMemcpyAsync(&per_out[i * per_points], dev_per_stream1, per_out_size, cudaMemcpyDeviceToHost, stream1);
-        if(next_idx < lengths.size())
+        if(i_plus_1 < lengths.size())
         {
-            cudaMemcpyAsync(&per_out[next_idx * per_points], dev_per_stream2, per_out_size, cudaMemcpyDeviceToHost, stream2);
+            cudaMemcpyAsync(&per_out[i_plus_1 * per_points], dev_per_stream2, per_out_size, cudaMemcpyDeviceToHost, stream2);
         }
-        if(next_next_idx < lengths.size())
+        if(i_plus_2 < lengths.size())
         {
-            cudaMemcpyAsync(&per_out[next_next_idx * per_points], dev_per_stream3, per_out_size, cudaMemcpyDeviceToHost, stream3);
+            cudaMemcpyAsync(&per_out[i_plus_2 * per_points], dev_per_stream3, per_out_size, cudaMemcpyDeviceToHost, stream3);
         }        
     }
 
