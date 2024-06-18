@@ -56,6 +56,7 @@ __global__ void LombScargleKernel(const float* __restrict__ times,
 
     float cos, sin, i_part;
 
+    #pragma unroll
     for (size_t idx = 0; idx < length; idx++) {
         float t = times[idx];
         float mag = mags[idx];
@@ -238,7 +239,10 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
 
         // Copy periodogram back to host
         cudaMemcpyAsync(&per_out[i * per_points], dev_per_stream1, per_out_size, cudaMemcpyDeviceToHost, stream1);
-        cudaMemcpyAsync(&per_out[next_idx * per_points], dev_per_stream2, per_out_size, cudaMemcpyDeviceToHost, stream2);
+        if(next_idx < lengths.size())
+        {
+            cudaMemcpyAsync(&per_out[next_idx * per_points], dev_per_stream2, per_out_size, cudaMemcpyDeviceToHost, stream2);
+        }
     }
 
     cudaStreamSynchronize(stream1);
