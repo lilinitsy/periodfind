@@ -192,7 +192,8 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
     const dim3 block_dim = dim3(x_threads, y_threads);
     const dim3 grid_dim = dim3(x_blocks, y_blocks);
 
-    // Create 3 cuda streams to pipeline async operations; loop would be cleaner, but slowed execution
+    // Create 3 cuda streams to pipeline async operations; a loop would be
+    // cleaner, but slowed execution
     cudaStream_t stream1;
     cudaStream_t stream2;
     cudaStream_t stream3;
@@ -211,17 +212,32 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
     gpuErrchk(cudaMalloc(&dev_times_buffer, buffer_bytes * num_streams));
     gpuErrchk(cudaMalloc(&dev_mags_buffer, buffer_bytes * num_streams));
 
+    /*
+    Zero conditional entropy output
+    This strictly does not seem to be necessary since every entry in dev_per
+    should be written to, but it's good to do at initialization to avoid
+    garbage being accidentally set. It can be done per loop too, but it
+    probably isn't necessary and introduces overhead */
+    gpuErrchk(cudaMemset(dev_per, 0, per_out_size * num_streams));
+
+    // Changing the code to use an inner loop increases runtime quite a bit
+    // It might be that CUDA's async calls aren't optimized by the compiler when
+    // doing that
 #pragma unroll
     for (size_t i = 0; i < lengths.size(); i += num_streams) {
         // Copy light curve into device buffer
-        size_t i_plus_1 = i + 1;
-        size_t i_plus_2 = i + 2;
+        const size_t i_plus_1 = i + 1;
+        const size_t i_plus_2 = i + 2;
         const size_t curve_bytes_i = lengths[i] * sizeof(float);
 
         cudaMemcpyAsync(dev_times_buffer, times[i], curve_bytes_i,
                         cudaMemcpyHostToDevice, stream1);
         cudaMemcpyAsync(dev_mags_buffer, mags[i], curve_bytes_i,
                         cudaMemcpyHostToDevice, stream1);
+
+        LombScargleKernel<<<grid_dim, block_dim, 0, stream1>>>(
+            dev_times_buffer, dev_mags_buffer, lengths[i], dev_periods,
+            dev_period_dts, num_periods, num_p_dts, *this, dev_per);
 
         if (i_plus_1 < lengths.size()) {
             const size_t curve_bytes_next = lengths[i_plus_1] * sizeof(float);
@@ -231,8 +247,6 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
             gpuErrchk(cudaMemcpyAsync(dev_mags_buffer + buffer_length,
                                       mags[i_plus_1], curve_bytes_next,
                                       cudaMemcpyHostToDevice, stream2));
-            gpuErrchk(cudaMemsetAsync(dev_per + per_points, 0, per_out_size,
-                                      stream2));
 
             LombScargleKernel<<<grid_dim, block_dim, 0, stream2>>>(
                 dev_times_buffer + buffer_length,
@@ -249,8 +263,6 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
             gpuErrchk(cudaMemcpyAsync(dev_mags_buffer + buffer_length_doubled,
                                       mags[i_plus_2], curve_bytes_next,
                                       cudaMemcpyHostToDevice, stream3));
-            gpuErrchk(cudaMemsetAsync(dev_per + per_points_doubled, 0,
-                                      per_out_size, stream3));
 
             LombScargleKernel<<<grid_dim, block_dim, 0, stream3>>>(
                 dev_times_buffer + buffer_length_doubled,
@@ -259,22 +271,17 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
                 dev_per + per_points_doubled);
         }
 
-        // Zero conditional entropy output
-        gpuErrchk(cudaMemsetAsync(dev_per, 0, per_out_size, stream1));
-
-        LombScargleKernel<<<grid_dim, block_dim, 0, stream1>>>(
-            dev_times_buffer, dev_mags_buffer, lengths[i], dev_periods,
-            dev_period_dts, num_periods, num_p_dts, *this, dev_per);
-
         // Copy periodogram back to host
         gpuErrchk(cudaMemcpyAsync(&per_out[i * per_points], dev_per,
                                   per_out_size, cudaMemcpyDeviceToHost,
                                   stream1));
+
         if (i_plus_1 < lengths.size()) {
             gpuErrchk(cudaMemcpyAsync(&per_out[i_plus_1 * per_points],
                                       dev_per + per_points, per_out_size,
                                       cudaMemcpyDeviceToHost, stream2));
         }
+
         if (i_plus_2 < lengths.size()) {
             gpuErrchk(cudaMemcpyAsync(
                 &per_out[i_plus_2 * per_points], dev_per + per_points_doubled,
