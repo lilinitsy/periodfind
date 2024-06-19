@@ -33,7 +33,6 @@ __global__ void LombScargleKernel(const float* __restrict__ times,
                                   const float* __restrict__ period_dts,
                                   const size_t num_periods,
                                   const size_t num_period_dts,
-                                  const LombScargle params,
                                   float* periodogram) {
     const size_t thread_x = threadIdx.x + blockIdx.x * blockDim.x;
     const size_t thread_y = threadIdx.y + blockIdx.y * blockDim.y;
@@ -121,7 +120,7 @@ float* LombScargle::DeviceCalcLS(const float* times,
 
     LombScargleKernel<<<grid_dim, block_dim>>>(times, mags, length, periods,
                                                period_dts, num_periods,
-                                               num_p_dts, *this, periodogram);
+                                               num_p_dts, periodogram);
 
     return periodogram;
 }
@@ -237,7 +236,7 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
 
         LombScargleKernel<<<grid_dim, block_dim, 0, stream1>>>(
             dev_times_buffer, dev_mags_buffer, lengths[i], dev_periods,
-            dev_period_dts, num_periods, num_p_dts, *this, dev_per);
+            dev_period_dts, num_periods, num_p_dts, dev_per);
 
         if (i_plus_1 < lengths.size()) {
             const size_t curve_bytes_next = lengths[i_plus_1] * sizeof(float);
@@ -251,8 +250,7 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
             LombScargleKernel<<<grid_dim, block_dim, 0, stream2>>>(
                 dev_times_buffer + buffer_length,
                 dev_mags_buffer + buffer_length, lengths[i_plus_1], dev_periods,
-                dev_period_dts, num_periods, num_p_dts, *this,
-                dev_per + per_points);
+                dev_period_dts, num_periods, num_p_dts, dev_per + per_points);
         }
 
         if (i_plus_2 < lengths.size()) {
@@ -267,7 +265,7 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
             LombScargleKernel<<<grid_dim, block_dim, 0, stream3>>>(
                 dev_times_buffer + buffer_length_doubled,
                 dev_mags_buffer + buffer_length_doubled, lengths[i_plus_2],
-                dev_periods, dev_period_dts, num_periods, num_p_dts, *this,
+                dev_periods, dev_period_dts, num_periods, num_p_dts,
                 dev_per + per_points_doubled);
         }
 
