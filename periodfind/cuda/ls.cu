@@ -158,6 +158,9 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
                                 const size_t num_periods,
                                 const size_t num_p_dts,
                                 float* per_out) const {
+    // Lengths: Tells how big each element of timestack and magstack are
+    // num_periods is the periods[0 : n] passed from python
+    
     // TODO: Look at ways of batching data transfer.
 
     // Size of one periodogram out array, and total periodogram output size.
@@ -165,6 +168,16 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
     const size_t per_out_size = per_points * sizeof(float);
     const size_t per_points_doubled = 2 * per_points;
     const size_t num_streams = 3;
+    size_t per_size_total = per_out_size * lengths.size();
+
+    printf("times len: %lu\n", times.size());
+    printf("mags len: %lu\n", mags.size());
+    printf("lengths len: %lu\n", lengths.size());
+
+    printf("per points: %lu\n", per_points);
+    printf("per_out_size: %lu\n", per_out_size);
+    printf("Num periods: %lu\n", num_periods);
+    printf("per size total: %lu\n", per_size_total);
 
     // Buffer size (large enough for longest light curve)
     auto max_length = std::max_element(lengths.begin(), lengths.end());
@@ -200,16 +213,25 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
     cudaStreamCreate(&stream2);
     cudaStreamCreate(&stream3);
 
+    size_t init_bytes_mallocd = 0;
+
     // Perform all allocations
     gpuErrchk(cudaMalloc(&dev_periods, num_periods * sizeof(float)));
+    init_bytes_mallocd += num_periods * sizeof(float);
     gpuErrchk(cudaMalloc(&dev_period_dts, num_p_dts * sizeof(float)));
+    init_bytes_mallocd += num_p_dts * sizeof(float);
     gpuErrchk(cudaMemcpy(dev_periods, periods, num_periods * sizeof(float),
                          cudaMemcpyHostToDevice));
     gpuErrchk(cudaMemcpy(dev_period_dts, period_dts, num_p_dts * sizeof(float),
                          cudaMemcpyHostToDevice));
     gpuErrchk(cudaMalloc(&dev_per, per_out_size * num_streams));
+    init_bytes_mallocd += per_out_size * num_streams;
     gpuErrchk(cudaMalloc(&dev_times_buffer, buffer_bytes * num_streams));
     gpuErrchk(cudaMalloc(&dev_mags_buffer, buffer_bytes * num_streams));
+    init_bytes_mallocd += buffer_bytes * num_streams;
+
+
+    printf("init bytes mallocd: %lu\n", init_bytes_mallocd);
 
     /*
     Zero conditional entropy output
@@ -222,8 +244,12 @@ void LombScargle::CalcLSBatched(const std::vector<float*>& times,
     // Changing the code to use an inner loop increases runtime quite a bit
     // It might be that CUDA's async calls aren't optimized by the compiler when
     // doing that
+
+
+    // Does one kernel call per light curve
 #pragma unroll
     for (size_t i = 0; i < lengths.size(); i += num_streams) {
+        // i is each lightcurve
         // Copy light curve into device buffer
         const size_t i_plus_1 = i + 1;
         const size_t i_plus_2 = i + 2;
